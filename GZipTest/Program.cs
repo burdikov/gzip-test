@@ -27,7 +27,7 @@ namespace GZipTest
                         timer.Start();
 
                         using (FileStream source = new FileStream(args[1], FileMode.Open))
-                        using (FileStream destination = new FileStream(args[2], FileMode.CreateNew))
+                        using (FileStream destination = new FileStream(args[2], FileMode.Create))
                         {
                             if (!pgzip.Compress(source, destination))
                             {

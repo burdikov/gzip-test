@@ -31,7 +31,7 @@ namespace GZipTest
 
         public override bool Compress(Stream source, Stream destination)
         {
-            var blockSupplier = new NonCompressedBlockSupplier(source, 65536);
+            var blockSupplier = new NonCompressedBlockSupplier(source, 1024*1024*20);
 
             ParallelByteArrayTransformer.ConsumeMethod consumeMethod = 
                 (byte[] buf) => destination.Write(buf, 0, buf.Length);
@@ -103,6 +103,8 @@ namespace GZipTest
                     Exception = _transformer.Exception;
                     return false;
                 }
+
+                Console.WriteLine("tryna cup method bruh");
 
                 source.Position = _srcpos;
                 destination.Position = _dstpos;

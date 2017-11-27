@@ -44,6 +44,8 @@
   <ItemGroup>
     <Compile Include="Archiver.cs" />
     <Compile Include="BlockSupplier.cs" />
+    <Compile Include="CleverQueue.cs" />
+    <Compile Include="DataBlock.cs" />
     <Compile Include="ParallelByteArrayTransformer.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

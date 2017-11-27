@@ -58,7 +58,7 @@ namespace GZipTest
 
         public ParallelByteArrayTransformer()
         {
-            _processorCount = Environment.ProcessorCount;
+            _processorCount = 1;// Environment.ProcessorCount;
 
             _processorReady = new AutoResetEvent[_processorCount];
             _dataSupplied = new AutoResetEvent[_processorCount];
@@ -116,6 +116,9 @@ namespace GZipTest
             return _exception == null ? true : false;
         }
 
+        CleverQueue queue1 = new CleverQueue(6);
+        CleverQueue queue2 = new CleverQueue(6);
+
         private void Supply(object o)
         {
             BlockSupplier supp = (BlockSupplier)o;
@@ -123,18 +126,12 @@ namespace GZipTest
             try
             {
                 int bytesSupplied = 1;
-                int cur = 0;
+                var partNo = 0;
 
-                while (bytesSupplied > 0 && !_aborting)
+                while (bytesSupplied > 0)
                 {
-                    if (_processorReady[cur].WaitOne(10))
-                    {
-                        bytesSupplied = supp.Next(out _bufs1[cur]);
-
-                        _dataSupplied[cur].Set();
-
-                        cur = (cur + 1) % _processorCount;
-                    }
+                    bytesSupplied = supp.Next(out byte[] buf);
+                    while (!queue1.TryEnqueue(buf, partNo++) && !_aborting);
                 }
             }
             catch (Exception e)
@@ -150,30 +147,25 @@ namespace GZipTest
             TransformMethod transform = aux.TransformMethod;
             int id = aux.Id;
 
-            byte[] buf;
+            byte[] buf, bufe;
+            int blockID;
 
             try
             {
                 while (true)
                 {
-                    _processorReady[id].Set();
-                    while (!_dataSupplied[id].WaitOne(10) && !_aborting);
+                    while (!queue1.TryDequeue(out bufe, out blockID) && !_aborting);
                     if (_aborting) break;
                     
-                    if (_bufs1[id].Length == 0)
+                    if (bufe.Length == 0)
                     {
-                        while (!_consumerReady[id].WaitOne(10) && !_aborting);
                         _aborting = true;
-                        _dataProcessed[id].Set();
                         break;
                     }
 
-                    buf = transform(_bufs1[id]);
+                    buf = transform(bufe);
 
-                    while (!_consumerReady[id].WaitOne(10) && !_aborting);
-
-                    _bufs2[id] = buf;
-                    _dataProcessed[id].Set();
+                    while (!queue2.TryEnqueue(buf, blockID) && !_aborting);
                 }
             }
             catch (Exception e)
@@ -188,18 +180,12 @@ namespace GZipTest
             ConsumeMethod consume = (ConsumeMethod)o;
             try
             {
-                int cur = 0;
-
+                byte[] buf;
                 while (true)
                 {
-                    _consumerReady[cur].Set();
-
-                    while (!_dataProcessed[cur].WaitOne(10) && !_aborting);
+                    while (!queue2.TryDequeue(out buf, out int id) && !_aborting);
                     if (_aborting) break;
-
-                    consume(_bufs2[cur]);
-
-                    cur = (cur + 1) % _processorCount;
+                    consume(buf);
                 }
             }
             catch (Exception e)
