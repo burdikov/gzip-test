@@ -11,104 +11,87 @@ namespace GZipTest
     internal abstract class BlockSupplier
     {
         protected Stream SourceStream { get; }
-        public int BlockSize { get; }
 
         protected int PartNumber { get; set; }
 
-        protected BlockSupplier(Stream sourceStream, int blockSize)
+        protected BlockSupplier(Stream sourceStream)
         {
             SourceStream = sourceStream;
-            BlockSize = blockSize;
         }
 
-        // Записывает ссылку на считанные данные в переданный аргумент
-        // и возвращает число считанных байтов.
-        // Гарантирует, что если не достигнут конец потока, будет
-        // возвращен как минимум один байт.
-        public abstract int Next(out byte[] buf);
+        // Считывает из SourceStream блок данных
+        // Никогда не возвращает null, в случае EOF 
+        // поле DataBlock.Size будет равно 0
+        public abstract DataBlock Next();
     }
 
     // Класс, который предназначен для считывания данных для упаковки.
     // Считывает данные безотносительно их содержания.
     internal class NonCompressedBlockSupplier : BlockSupplier
     {
-        private byte[] _buf;
+        private int _blockSize;
 
-        public NonCompressedBlockSupplier(Stream sourceStream, int blockSize) : base(sourceStream, blockSize)
+        public NonCompressedBlockSupplier(Stream sourceStream, int blockSize) : base(sourceStream)
         {
-            _buf = new byte[BlockSize];
+            _blockSize = blockSize;    
         }
 
-        public override int Next(out byte[] buf)
+        public override DataBlock Next()
         {
             lock (SourceStream)
             {
-                var bytesRead = SourceStream.Read(_buf, 0, _buf.Length);
+                var dataBlock = new DataBlock(PartNumber++, new byte[_blockSize]);
 
-                buf = new byte[bytesRead];
-                Array.Copy(_buf, buf, bytesRead);
+                int bytesRead, offset = 0;
 
-                return bytesRead;
+                do
+                {
+                    bytesRead = SourceStream.Read(dataBlock.Data, offset, dataBlock.Size - offset);
+                    offset += bytesRead;
+                }
+                while (offset != dataBlock.Size && bytesRead != 0);
+
+                dataBlock.Resize(offset);
+
+                return dataBlock;
             }
         }
     }
 
     // Класс, который предназначен для считывания данных для распаковки.
-    // Ищет в потоке заголовок gzip-архива (0x1f 0x8b 0x08) и возвращает
-    // все байты вплоть до следующего заголовка или конца.
+    // Ожидает, что в поле MTIME заголовка будет записан размер блока
     internal class GZipCompressedBlockSupplier : BlockSupplier
     {
-        private byte[] _buf;
-
-        public GZipCompressedBlockSupplier(Stream sourceStream, int blockSize) : base(sourceStream, blockSize)
+        public GZipCompressedBlockSupplier(Stream sourceStream) : base(sourceStream)
         {
-            _buf = new byte[BlockSize];
         }
 
-        public override int Next(out byte[] buf)
+        public override DataBlock Next()
         {
-            long initPosition = SourceStream.Position;
-            
             lock (SourceStream)
             {
-                var bytesRead = 1;
-                byte x = 0, y = 0, z = 0;
-                var nextPart = new List<byte>();
+                var buf = new byte[10];
+                var bytesRead = SourceStream.Read(buf, 0, buf.Length);
+                if (bytesRead == 0) return new DataBlock(PartNumber++, new byte[0]);
+                if (buf[0] != 0x1f || buf[1] != 0x8b || buf[2] != 0x08)
+                    throw new InvalidDataException("Archive is not valid or it was not created by this program.");
 
-                while (bytesRead > 0)
+                var blockSize = BitConverter.ToInt32(buf, 4);
+                buf = new byte[blockSize];
+
+                SourceStream.Position -= 10;
+                var offset = 0;
+
+                // Stream.Read не гарантирует заполнение буфера при вызове
+                // Цикл нужен, чтобы гарантировать считывание блока
+                do
                 {
-                    bytesRead = SourceStream.Read(_buf, 0, _buf.Length);
-
-                    for (int i = 0; i < bytesRead; i++)
-                    {
-                        z = _buf[i];
-                        if (x == 31 && y == 139 && z == 8)
-                        {
-                            if (nextPart.Count > 2)
-                            {
-                                buf = nextPart.ToArray();
-                                SourceStream.Position = initPosition + buf.Length;
-                                return buf.Length;
-                            }
-                            nextPart = new List<byte> { x };
-                        }
-                        else
-                        {
-                            nextPart.Add(x);
-                        }
-                        x = y;
-                        y = z;
-                    }
+                    bytesRead = SourceStream.Read(buf, offset, buf.Length - offset);
+                    offset += bytesRead;
                 }
+                while (offset != blockSize && bytesRead != 0);
 
-                if (nextPart.Count > 0)
-                {
-                    nextPart.Add(y);
-                    nextPart.Add(z);
-                }
-                buf = nextPart.ToArray();
-                SourceStream.Position = initPosition + buf.Length;
-                return buf.Length;
+                return new DataBlock(PartNumber++, buf);
             }
         }
     }

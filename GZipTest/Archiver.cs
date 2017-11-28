@@ -31,21 +31,25 @@ namespace GZipTest
 
         public override bool Compress(Stream source, Stream destination)
         {
-            var blockSupplier = new NonCompressedBlockSupplier(source, 1024*1024*20);
+            var blockSupplier = new NonCompressedBlockSupplier(source, 1024 * 1024);
 
             ParallelByteArrayTransformer.ConsumeMethod consumeMethod = 
-                (byte[] buf) => destination.Write(buf, 0, buf.Length);
+                (DataBlock dataBlock) => destination.Write(dataBlock.Data, 0, dataBlock.Size);
 
+
+            // Сжимает блок и в поле MTIME заголовка записывает размер выходного потока
             ParallelByteArrayTransformer.TransformMethod compressMethod =
-                (byte[] buf) =>
+                (DataBlock dataBlock) =>
                 {
                     using (var ms = new MemoryStream())
                     {
-                        using (var gzip = new GZipStream(ms, CompressionMode.Compress))
+                        using (var gzip = new GZipStream(ms, CompressionMode.Compress, true))
                         {
-                            gzip.Write(buf, 0, buf.Length);
+                            gzip.Write(dataBlock.Data, 0, dataBlock.Size);
                         }
-                        return ms.ToArray();
+                        ms.Seek(4, 0);
+                        ms.Write(BitConverter.GetBytes((int)ms.Length), 0, 4);
+                        dataBlock.Data = ms.ToArray();
                     }
                 };
 
@@ -63,15 +67,15 @@ namespace GZipTest
             long _srcpos = source.Position;
             long _dstpos = destination.Position;
 
-            var blockSupplier = new GZipCompressedBlockSupplier(source, 65536);
+            var blockSupplier = new GZipCompressedBlockSupplier(source);
 
             ParallelByteArrayTransformer.ConsumeMethod consumeMethod =
-                (byte[] buf) => destination.Write(buf, 0, buf.Length);
+                (DataBlock dataBlock) => destination.Write(dataBlock.Data, 0, dataBlock.Size);
 
             ParallelByteArrayTransformer.TransformMethod transformMethod =
-                (byte[] buf) =>
+                (DataBlock dataBlock) =>
                 {
-                    using (var ms = new MemoryStream(buf))
+                    using (var ms = new MemoryStream(dataBlock.Data))
                     using (var gzip = new GZipStream(ms, CompressionMode.Decompress))
                     {
                         var outbuf = new byte[ms.Length * 2];
@@ -86,7 +90,7 @@ namespace GZipTest
                         }
 
                         Array.Resize(ref outbuf, offset);
-                        return outbuf;
+                        dataBlock.Data = outbuf;
                     }
                 };
 
@@ -94,17 +98,16 @@ namespace GZipTest
                 return true;
             else
             {
-                var e = _transformer.Exception;
+                Exception = _transformer.Exception;
 
-                if (e is IOException ||
-                    e is InvalidOperationException ||
-                    e is ObjectDisposedException)
+                if (Exception is IOException ||
+                    Exception is InvalidOperationException ||
+                    Exception is ObjectDisposedException)
                 {
-                    Exception = _transformer.Exception;
                     return false;
                 }
 
-                Console.WriteLine("tryna cup method bruh");
+                Console.WriteLine("Main algorythm failed. Let's try other way.");
 
                 source.Position = _srcpos;
                 destination.Position = _dstpos;
@@ -117,15 +120,18 @@ namespace GZipTest
         {
             try
             {
-                var buf = new byte[65536];
+                var buf = new byte[1024*1024];
                 var bytesRead = 1;
 
-                using (var gzip = new GZipStream(source, CompressionMode.Decompress, true))
+                while (source.Position != source.Length)
                 {
-                    while (bytesRead > 0)
+                    using (var gzip = new GZipStream(source, CompressionMode.Decompress, true))
                     {
-                        bytesRead = gzip.Read(buf, 0, buf.Length);
-                        destination.Write(buf, 0, bytesRead);
+                        while (bytesRead > 0)
+                        {
+                            bytesRead = gzip.Read(buf, 0, buf.Length);
+                            destination.Write(buf, 0, bytesRead);
+                        }
                     }
                 }
                 return true;

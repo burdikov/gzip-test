@@ -16,10 +16,11 @@ namespace GZipTest
     // Поддерживает отмену и механизм сообщения об ошибках.
     class ParallelByteArrayTransformer
     {
-        public delegate byte[] TransformMethod(byte[] buf);
-        public delegate void ConsumeMethod(byte[] buf);
+        public delegate void TransformMethod(DataBlock dataBlock);
+        public delegate void ConsumeMethod(DataBlock dataBlock);
 
         private bool _aborting;
+        private bool _exiting;
 
         private Exception _exception;
         public Exception Exception
@@ -36,20 +37,6 @@ namespace GZipTest
 
         private int _processorCount;
 
-        private AutoResetEvent[] _processorReady;
-        private AutoResetEvent[] _dataSupplied;
-        private AutoResetEvent[] _consumerReady;
-        private AutoResetEvent[] _dataProcessed;
-
-        private byte[][] _bufs1;
-        private byte[][] _bufs2;
-
-        private struct _aux
-        {
-            public TransformMethod TransformMethod;
-            public int Id;
-        }
-
         public void Cancel()
         {
             _aborting = true;
@@ -58,38 +45,14 @@ namespace GZipTest
 
         public ParallelByteArrayTransformer()
         {
-            _processorCount = 1;// Environment.ProcessorCount;
-
-            _processorReady = new AutoResetEvent[_processorCount];
-            _dataSupplied = new AutoResetEvent[_processorCount];
-            _consumerReady = new AutoResetEvent[_processorCount];
-            _dataProcessed = new AutoResetEvent[_processorCount];
-
-            for (int i = 0; i < _processorCount; i++)
-            {
-                _processorReady[i] = new AutoResetEvent(false);
-                _dataSupplied[i] = new AutoResetEvent(false);
-                _consumerReady[i] = new AutoResetEvent(false);
-                _dataProcessed[i] = new AutoResetEvent(false);
-            }
-
-            _bufs1 = new byte[_processorCount][];
-            _bufs2 = new byte[_processorCount][];
+            _processorCount = Environment.ProcessorCount;
         }
 
         public bool Transform(BlockSupplier blockSupplier, TransformMethod transformMethod, ConsumeMethod consumeMethod)
         {
-            for (int i = 0; i < _processorCount; i++)
-            {
-                _processorReady[i].Reset();
-                _dataSupplied[i].Reset();
-                _consumerReady[i].Reset();
-                _dataProcessed[i].Reset();
-            }
-
             var threadList = new List<Thread>();
 
-            var supplier = new Thread(Supply) { Name = "Supplier", IsBackground = true, Priority = ThreadPriority.AboveNormal };
+            var supplier = new Thread(Supply) { Name = "Supplier", IsBackground = true, Priority = ThreadPriority.Normal };
             threadList.Add(supplier);
             supplier.Start(blockSupplier);
 
@@ -97,15 +60,16 @@ namespace GZipTest
             for (int i = 0; i < _processorCount; i++)
             {
                 processors[i] = new Thread(Process)
-                    { Name = $"worker {i}", IsBackground = true, Priority = ThreadPriority.AboveNormal };
+                { Name = $"worker {i}", IsBackground = true, Priority = ThreadPriority.AboveNormal };
                 threadList.Add(processors[i]);
-                processors[i].Start(new _aux { Id = i, TransformMethod = transformMethod });
+                processors[i].Start(transformMethod);
+                Thread.Sleep(20);
             }
 
-            var consumer = new Thread(Consume) { Name = "Writer", IsBackground = true, Priority = ThreadPriority.AboveNormal };
+            var consumer = new Thread(Consume) { Name = "Writer", IsBackground = true, Priority = ThreadPriority.Normal };
             threadList.Add(consumer);
             consumer.Start(consumeMethod);
-            
+
             supplier.Join();
             for (int i = 0; i < processors.Length; i++)
             {
@@ -116,56 +80,53 @@ namespace GZipTest
             return _exception == null ? true : false;
         }
 
-        CleverQueue queue1 = new CleverQueue(6);
-        CleverQueue queue2 = new CleverQueue(6);
+        ConcurrentQueue<DataBlock> queue1 = new ConcurrentQueue<DataBlock>(20);
+        ConcurrentQueue<DataBlock> queue2 = new ConcurrentQueue<DataBlock>(20);
 
         private void Supply(object o)
         {
-            BlockSupplier supp = (BlockSupplier)o;
-
             try
             {
-                int bytesSupplied = 1;
-                var partNo = 0;
-
-                while (bytesSupplied > 0)
+                BlockSupplier supp = (BlockSupplier)o;
+                DataBlock dataBlock;
+                do
                 {
-                    bytesSupplied = supp.Next(out byte[] buf);
-                    while (!queue1.TryEnqueue(buf, partNo++) && !_aborting);
+                    dataBlock = supp.Next();
+                    while (!queue1.TryEnqueue(dataBlock, 100) && !_aborting) ;
                 }
+                while (dataBlock.Size > 0);
             }
             catch (Exception e)
             {
                 _exception = e;
                 _aborting = true;
             }
+
         }
 
         private void Process(object o)
         {
-            var aux = (_aux)o;
-            TransformMethod transform = aux.TransformMethod;
-            int id = aux.Id;
+            TransformMethod transform = (TransformMethod)o;
 
-            byte[] buf, bufe;
-            int blockID;
+            DataBlock dataBlock;
 
             try
             {
                 while (true)
                 {
-                    while (!queue1.TryDequeue(out bufe, out blockID) && !_aborting);
-                    if (_aborting) break;
-                    
-                    if (bufe.Length == 0)
+                    while (!queue1.TryDequeue(out dataBlock, timeout: 100) && !_aborting && !_exiting) ;
+                    if (_aborting || _exiting) break;
+
+                    if (dataBlock.Size == 0)
                     {
-                        _aborting = true;
+                        while (!queue2.TryEnqueue(dataBlock, timeout: 100) && !_aborting) ;
+                        _exiting = true;
                         break;
                     }
 
-                    buf = transform(bufe);
+                    transform(dataBlock);
 
-                    while (!queue2.TryEnqueue(buf, blockID) && !_aborting);
+                    while (!queue2.TryEnqueue(dataBlock, timeout: 100) && !_aborting) ;
                 }
             }
             catch (Exception e)
@@ -180,12 +141,40 @@ namespace GZipTest
             ConsumeMethod consume = (ConsumeMethod)o;
             try
             {
-                byte[] buf;
+                DataBlock dataBlock;
+                List<DataBlock> lostAndFound = new List<DataBlock>();
+                int partNo = 0;
+                bool exit = false;
+
                 while (true)
                 {
-                    while (!queue2.TryDequeue(out buf, out int id) && !_aborting);
+                    while (!queue2.TryDequeue(out dataBlock, timeout: 100) && !_aborting) ;
                     if (_aborting) break;
-                    consume(buf);
+
+                    if (dataBlock.ID == partNo)
+                    {
+                        consume(dataBlock);
+                        partNo++;
+                    }
+                    else lostAndFound.Add(dataBlock);
+
+                    for (int i = 0; i < lostAndFound.Count;)
+                    {
+                        dataBlock = lostAndFound.Find(x => x.ID == partNo);
+
+                        if (dataBlock == null) break;
+
+                        partNo++;
+                        lostAndFound.Remove(dataBlock);
+
+                        if (dataBlock.Size == 0)
+                        {
+                            exit = true;
+                            break;
+                        }
+                        consume(dataBlock);
+                    }
+                    if (exit) break;
                 }
             }
             catch (Exception e)

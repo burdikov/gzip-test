@@ -27,7 +27,7 @@ namespace GZipTest
                         timer.Start();
 
                         using (FileStream source = new FileStream(args[1], FileMode.Open))
-                        using (FileStream destination = new FileStream(args[2], FileMode.Create))
+                        using (FileStream destination = new FileStream(args[2], FileMode.CreateNew))
                         {
                             if (!pgzip.Compress(source, destination))
                             {
@@ -62,7 +62,7 @@ namespace GZipTest
             }
             catch (Exception e)
             {
-                Console.WriteLine("Error! " + e.Message);
+                PrintError(e);
                 Environment.Exit(2);
             }
             Console.WriteLine($"Success! Elapsed time: {timer.ElapsedMilliseconds}ms");
@@ -74,6 +74,7 @@ namespace GZipTest
             Console.WriteLine(e.GetType().ToString());
             Console.WriteLine($"{e.Message}\nIn {e.Source}.{e.TargetSite}");
             Console.WriteLine(e.StackTrace);
+            if (e.InnerException != null) PrintError(e.InnerException);
         }
 
         public static void PrintUsage()
